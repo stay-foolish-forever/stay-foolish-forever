@@ -1,11 +1,11 @@
 ## Hi there 👋
 
-I'm **Lei Zhang**, a first-year Ph.D. student at the School of Software, Nanjing University.
+I'm **Lei Zhang**, a first-year Ph.D. student in the [**DevOps+ Research Laboratory**](https://softeng.nju.edu.cn/) (南京大学软件研发效能实验室) at the Software Institute, Nanjing University.
 
-📫 How to reach me:
+📫 If you'd like to get in touch, feel free to reach out via either of the emails below — I'll do my best to reply when I can:
 
 - General contact: darkzhang59546@163.com
-- Academic collaboration: 602025320025@smail.nju.edu.cn
+- School email (for research-related discussions): 602025320025@smail.nju.edu.cn
 
 ## ✍️ Blog & Writing
 

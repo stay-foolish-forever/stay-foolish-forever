@@ -15,16 +15,10 @@ This guy is lazy — no blog posts or articles for now.
 
 <div>
     <a href="https://github.com/stay-foolish-forever">
-        <img height=250 align="center" src="https://github-readme-stats.vercel.app/api/top-langs/?username=stay-foolish-forever&show_icons=true&theme=tokyonight&card_width=200" />
+        <img height=200 align="center" src="https://github-readme-stats.vercel.app/api/top-langs/?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
     </a>
     <a href="https://github.com/stay-foolish-forever">
-        <img height=250 align="center" src="https://github-readme-stats.vercel.app/api?username=stay-foolish-forever&show_icons=true&theme=tokyonight&card_width=455" />
-    </a>
-    <a href="https://github.com/alibaba/open-code-review">
-        <img align="center" height=150 src="https://github-readme-stats.vercel.app/api/pin/?username=stay-foolish-forever&repo=open-code-review&theme=tokyonight" />
-    </a>
-    <a href="https://github.com/alibaba/open-code-review">
-        <img align="center" height=150 src="https://github-readme-stats.vercel.app/api/pin/?username=runnel-ai&repo=runnel-todo&theme=tokyonight">
+        <img height=200 align="center" src="https://github-readme-stats.vercel.app/api?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
     </a>
 </div>
 

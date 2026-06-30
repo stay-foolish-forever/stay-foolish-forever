@@ -15,10 +15,10 @@ This guy is lazy — no blog posts or articles for now.
 
 <div>
     <a href="https://github.com/stay-foolish-forever">
-        <img height=200 align="center" src="https://github-readme-stats.vercel.app/api/top-langs/?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
+        <img height=200 align="center" src="https://github-stats-extended.vercel.app/api/top-langs/?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
     </a>
     <a href="https://github.com/stay-foolish-forever">
-        <img height=200 align="center" src="https://github-readme-stats.vercel.app/api?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
+        <img height=200 align="center" src="https://github-stats-extended.vercel.app/api?username=stay-foolish-forever&show_icons=true&theme=tokyonight" />
     </a>
 </div>
 

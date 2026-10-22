@@ -23,7 +23,7 @@ The site itself is in **Chinese (`lang="zh-CN"`)**: UI strings, blog content, an
 │   └── deploy.yml             # build + rsync deploy pipeline
 └── site/                      # the Astro website (all app code lives here)
     ├── astro.config.mjs       # Astro config: site URL, MDX + sitemap integrations, Shiki themes
-    ├── package.json           # Node >= 22.12.0 required
+    ├── package.json           # Node >= 22.23.4 required
     ├── tsconfig.json          # extends astro/tsconfigs/strict + strictNullChecks
     ├── public/                # static files served as-is (favicons)
     └── src/
@@ -43,7 +43,7 @@ The site itself is in **Chinese (`lang="zh-CN"`)**: UI strings, blog content, an
 - **Astro ^7** static site generator — no UI framework (no React/Vue/etc.); plain `.astro` components with TypeScript in frontmatter and inline `<script>` blocks.
 - Integrations: `@astrojs/mdx`, `@astrojs/rss`, `@astrojs/sitemap`; `sharp` for image optimization.
 - TypeScript strict mode (`astro/tsconfigs/strict` + `strictNullChecks`).
-- Node.js **>= 22.12.0** (see `site/package.json` `engines`; CI uses Node 22).
+- Node.js **>= 22.23.4** (see `site/package.json` `engines`; required by Astro 7.4+. CI uses Node 22 with `check-latest`).
 - No test framework, no linter/formatter config, no husky hooks. `package.json` also contains a non-standard `allowScripts` field (`esbuild: true`); npm itself ignores it.
 
 ## Build and dev commands

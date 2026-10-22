@@ -1,0 +1,1332 @@
+<canvas class="season-scene" id="season-scene" aria-hidden="true"></canvas>
+<div class="scene-status" id="scene-status" aria-hidden="true"></div>
+
+<style>
+	.season-scene {
+		position: fixed;
+		inset: 0;
+		width: 100%;
+		height: 100%;
+		z-index: -1;
+		/* 不透明幕布：平时遮住沉在 z-index:-2 的页脚，抽屉打开时随前景上移将其露出 */
+		background: var(--bg);
+		pointer-events: none;
+	}
+	.scene-status {
+		position: fixed;
+		right: 1em;
+		bottom: 1em;
+		z-index: 5;
+		padding: 0.25em 0.8em;
+		font-size: 12px;
+		letter-spacing: 0.05em;
+		color: var(--muted);
+		background: color-mix(in srgb, var(--bg) 88%, transparent);
+		border: 1px solid var(--border);
+		border-radius: 999px;
+		pointer-events: none;
+	}
+</style>
+
+<script>
+	import { createRenderer } from './scene-gl';
+	import type { CloudGroup, LeafP, SmokeSeed } from './scene-gl';
+
+	type Season = 'spring' | 'summer' | 'autumn' | 'winter';
+	type Weather = 'clear' | 'rain' | 'snow' | 'cloudy' | 'windy';
+
+	interface Palette {
+		sky: string;
+		far: string;
+		near: string;
+		ground: string;
+		grass: [string, string];
+		trunk: string;
+		canopy: string[];
+		snow: boolean; // 冬季：松枝顶面挂雪
+	}
+	interface Blade {
+		x: number;
+		y: number;
+		len: number;
+		phase: number;
+		shade: number;
+	}
+	interface Star {
+		x: number;
+		y: number;
+		r: number;
+		phase: number;
+		speed: number;
+	}
+	interface RainDrop {
+		x: number;
+		y: number;
+		vy: number;
+		len: number;
+	}
+	interface Cloud {
+		x: number;
+		y: number;
+		scale: number;
+		vx: number;
+	}
+	interface RidgePoint {
+		x: number;
+		y: number;
+		peak: boolean;
+	}
+	interface FTree {
+		x: number;
+		base: number;
+		s: number;
+		row: number; // 深度排：0 远 / 1 中 / 2 近
+		seed: number; // 每棵树独立的随机种子
+		lean: number; // 微倾斜（弧度）
+	}
+	interface Firefly {
+		ax: number;
+		ay: number;
+		phase: number;
+		size: number;
+	}
+
+	// ---- 可调参数 ----
+	const SEASON_OVERRIDE: Season | null = null; // 调试：强制季节，如 'winter'
+	const WEATHER_OVERRIDE: Weather | null = null; // 调试：强制天气，如 'rain'
+	const WEATHER_MIN_MINUTES = 3;
+	const WEATHER_MAX_MINUTES = 8;
+	const FOREST_EDGE = 0.38; // 左侧森林 / 右侧平原的分界（屏宽比例）
+
+	const canvas = document.getElementById('season-scene') as HTMLCanvasElement | null;
+	const chip = document.getElementById('scene-status');
+
+	// 动态层走 WebGL2（scene-gl.ts）；取不到 WebGL2 时退化为静态 2D 画面（不动画）
+	const renderer = canvas ? createRenderer(canvas) : null;
+	const fbCtx = canvas && !renderer ? canvas.getContext('2d') : null;
+
+	// 静态层离屏缓存：天空/日月/山脉/地面/花/森林/帐篷/篝火架只在 resize、换主题、换季时重绘。
+	// WebGL 模式下烘焙结果上传为纹理，每帧以单个全屏三角形合成。
+	const staticCanvas = document.createElement('canvas');
+	const sctx = staticCanvas.getContext('2d');
+	let staticDirty = true;
+	let dpr = 1;
+	let ctx: CanvasRenderingContext2D | null = fbCtx;
+
+	if (canvas && (renderer || fbCtx)) {
+		const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+		// 打开网页时随机选一季起跑，之后按 SEASON_ROTATE_MINUTES 周期顺序轮换
+		const SEASONS: Season[] = ['spring', 'summer', 'autumn', 'winter'];
+		const SEASON_ROTATE_MINUTES = 12;
+		let season: Season = SEASON_OVERRIDE ?? SEASONS[Math.floor(Math.random() * 4)];
+
+		const WEATHER_POOL: Record<Season, Weather[]> = {
+			spring: ['clear', 'clear', 'rain', 'cloudy', 'windy'],
+			summer: ['clear', 'clear', 'rain', 'cloudy'],
+			autumn: ['clear', 'clear', 'rain', 'cloudy', 'windy'],
+			winter: ['clear', 'clear', 'snow', 'cloudy', 'windy'],
+		};
+		let weather: Weather = WEATHER_OVERRIDE ?? 'clear';
+
+		let isNight = document.documentElement.dataset.theme === 'dark';
+
+		const CN = {
+			season: { spring: '春', summer: '夏', autumn: '秋', winter: '冬' } as Record<Season, string>,
+			weather: { clear: '晴', rain: '雨', snow: '雪', cloudy: '多云', windy: '风' } as Record<Weather, string>,
+		};
+		const updateChip = () => {
+			if (chip) chip.textContent = `${CN.season[season]} · ${isNight ? '夜' : '昼'} · ${CN.weather[weather]}`;
+		};
+
+		const PALETTES: Record<Season, { day: Palette; night: Palette }> = {
+			spring: {
+				day: {
+					sky: 'rgba(168, 224, 196, 0.9)', far: '#b9dcb2', near: '#94ca8b', ground: '#7cbb6e',
+					grass: ['#5aa652', '#4a8f44'], trunk: '#5a4632',
+					canopy: ['#3e7a4e', '#356b43', '#4a8a5a'], snow: false,
+				},
+				night: {
+					sky: 'rgba(15, 32, 40, 0.92)', far: '#12262b', near: '#0e1d21', ground: '#0c1916',
+					grass: ['#1b382a', '#152c21'], trunk: '#14100c',
+					canopy: ['#14261b', '#101f16', '#182c20'], snow: false,
+				},
+			},
+			summer: {
+				day: {
+					sky: 'rgba(140, 200, 240, 0.9)', far: '#a9d3a0', near: '#7fbf6f', ground: '#5cae56',
+					grass: ['#3f9440', '#2f7d33'], trunk: '#5a4632',
+					canopy: ['#2e6b3a', '#265c33', '#3a7a46'], snow: false,
+				},
+				night: {
+					sky: 'rgba(13, 20, 48, 0.92)', far: '#101c33', near: '#0c1626', ground: '#0a141f',
+					grass: ['#10241c', '#0d1d17'], trunk: '#14100c',
+					canopy: ['#10241a', '#0d1d15', '#142b1e'], snow: false,
+				},
+			},
+			autumn: {
+				day: {
+					sky: 'rgba(240, 205, 145, 0.9)', far: '#dcb98a', near: '#c99e63', ground: '#c29a4e',
+					grass: ['#a8823c', '#8f6e2f'], trunk: '#5a4632',
+					canopy: ['#336b42', '#2b5c39', '#3f7a4d'], snow: false,
+				},
+				night: {
+					sky: 'rgba(26, 20, 48, 0.92)', far: '#241c33', near: '#1a1426', ground: '#171019',
+					grass: ['#2e2517', '#241d12'], trunk: '#14100c',
+					canopy: ['#122016', '#0e1a12', '#16261b'], snow: false,
+				},
+			},
+			winter: {
+				day: {
+					sky: 'rgba(190, 208, 226, 0.9)', far: '#dde7ef', near: '#c9d6e2', ground: '#eef3f7',
+					grass: ['#b8a98f', '#a39074'], trunk: '#5a4632',
+					canopy: ['#3c5346', '#33483d', '#455f50'], snow: true,
+				},
+				night: {
+					sky: 'rgba(11, 18, 38, 0.92)', far: '#18222f', near: '#121a26', ground: '#232e3c',
+					grass: ['#3a3f49', '#2f343d'], trunk: '#14100c',
+					canopy: ['#141f1a', '#101a15', '#18241e'], snow: true,
+				},
+			},
+		};
+		const pal = () => PALETTES[season][isNight ? 'night' : 'day'];
+
+		let w = 0;
+		let h = 0;
+		const rand = (min: number, max: number) => min + Math.random() * (max - min);
+
+		// 固定种子的随机数：山形在单次访问中稳定，每次访问重新生成
+		const ridgeSeed = Math.floor(Math.random() * 1e9);
+		const mulberry32 = (a: number) => () => {
+			a |= 0;
+			a = (a + 0x6d2b79f5) | 0;
+			let t = Math.imul(a ^ (a >>> 15), 1 | a);
+			t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+			return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+		};
+
+		// 连绵群山：峰谷交替的折线（棱角感），两层递进
+		let farRidge: RidgePoint[] = [];
+		let nearRidge: RidgePoint[] = [];
+		const buildRidge = (
+			baseY: number,
+			ampMin: number,
+			ampMax: number,
+			stepMin: number,
+			stepMax: number,
+			rng: () => number,
+		): RidgePoint[] => {
+			const pts: RidgePoint[] = [{ x: -60, y: baseY + rng() * 20, peak: false }];
+			let x = -60;
+			let isPeak = true;
+			while (x < w + 60) {
+				x += stepMin + rng() * (stepMax - stepMin);
+				const y = isPeak ? baseY - (ampMin + rng() * (ampMax - ampMin)) : baseY + rng() * ampMin * 0.5;
+				pts.push({ x, y, peak: isPeak });
+				isPeak = !isPeak;
+			}
+			return pts;
+		};
+		const buildRidges = () => {
+			farRidge = buildRidge(h * 0.52, h * 0.05, h * 0.14, 90, 190, mulberry32(ridgeSeed));
+			nearRidge = buildRidge(h * 0.63, h * 0.04, h * 0.09, 130, 250, mulberry32(ridgeSeed + 1));
+		};
+
+		// 草地（平原）保持柔和的起伏
+		const groundY = (x: number) =>
+			h * 0.78 + Math.sin(x * 0.005 + 2.1) * h * 0.016 + Math.sin(x * 0.013) * h * 0.008;
+
+		let stars: Star[] = [];
+		let grassBlades: Blade[] = [];
+		let flowers: { x: number; y: number; color: number }[] = [];
+		let forest: FTree[] = [];
+		let fallLeaves: LeafP[] = [];
+		let fireflies: Firefly[] = [];
+		let rainDrops: RainDrop[] = [];
+		let snowFlakes: { x: number; y: number; vy: number; size: number; phase: number }[] = [];
+		let ambientClouds: Cloud[] = [];
+		let weatherClouds: Cloud[] = [];
+		let tentPos = { x: 0, base: 0, s: 1 };
+		let firePos = { x: 0, y: 0 };
+		let smoke: SmokeSeed[] = [];
+
+		const buildStars = () => {
+			stars = Array.from({ length: 56 }, () => ({
+				x: Math.random() * w,
+				y: Math.random() * h * 0.34, // 限制在山脊线以上，避免星星叠到山峰上
+				r: rand(0.6, 2),
+				phase: Math.random() * Math.PI * 2,
+				speed: rand(0.0005, 0.002),
+			}));
+		};
+
+		const buildGrass = () => {
+			const density = season === 'winter' ? 0.35 : 1;
+			const count = Math.min(430, Math.floor((w / 3) * density));
+			grassBlades = Array.from({ length: count }, () => {
+				// 平原区域更密，林下稀疏
+				const inForest = Math.random() < 0.3;
+				const x = inForest
+					? Math.random() * w * FOREST_EDGE
+					: w * FOREST_EDGE + Math.random() * w * (1 - FOREST_EDGE);
+				return {
+					x,
+					y: groundY(x) + rand(2, h * 0.09),
+					len: rand(8, season === 'summer' ? 24 : 18) * (inForest ? 0.7 : 1),
+					phase: Math.random() * Math.PI * 2,
+					shade: Math.random() < 0.5 ? 0 : 1,
+				};
+			});
+			flowers =
+				season === 'spring'
+					? Array.from({ length: 30 }, () => {
+							const x = w * FOREST_EDGE + Math.random() * w * (1 - FOREST_EDGE);
+							return { x, y: groundY(x) + rand(4, h * 0.07), color: Math.random() };
+						})
+					: [];
+		};
+
+		// 三排树：远排小而淡、近排大而实、间距更开（缝隙透出后排 = 层叠感）
+		const ROW_DEF = [
+			{ gap: [30, 46], scale: [0.42, 0.58] },
+			{ gap: [38, 58], scale: [0.62, 0.82] },
+			{ gap: [52, 80], scale: [0.88, 1.15] },
+		];
+		const ROW_ALPHA = [0.45, 0.68, 1];
+
+		const buildForest = () => {
+			const sBase = h / 700;
+			forest = [];
+			ROW_DEF.forEach((rd, row) => {
+				for (let x = -60; x < w * FOREST_EDGE - (row === 2 ? 10 : 0); x += rand(rd.gap[0], rd.gap[1])) {
+					forest.push({
+						x,
+						base: groundY(x) + 2 + row * 2,
+						s: sBase * rand(rd.scale[0], rd.scale[1]),
+						row,
+						seed: Math.random() * 1000,
+						lean: rand(-0.045, 0.045),
+					});
+				}
+			});
+		};
+
+		// 秋叶 / 春瓣：从近排树的枝头飘落。
+		// 轨迹是时间的纯函数（WebGL 顶点着色器里求值），这里只烘焙每片的固定参数
+		const spawnLeaf = (treeX: number): LeafP => {
+			const x0 = treeX + rand(-46, 46);
+			const y0 = groundY(treeX) - rand(90, 150);
+			return {
+				x0,
+				y0,
+				fall: groundY(x0) - 2 - y0,
+				vy: rand(0.5, 1.1),
+				phase: Math.random() * Math.PI * 2,
+				rot0: Math.random() * Math.PI * 2,
+				vr: rand(-0.03, 0.03),
+				size: rand(3.5, 6),
+				tint: Math.random(),
+			};
+		};
+		const buildLeaves = () => {
+			const perTree = season === 'autumn' ? 3 : season === 'spring' ? 2 : 0;
+			fallLeaves = forest
+				.filter((t) => t.row === 2)
+				.filter((_, i) => i % 2 === 0)
+				.flatMap((t) => Array.from({ length: perTree }, () => spawnLeaf(t.x)));
+		};
+
+		const buildFireflies = () => {
+			fireflies =
+				season === 'summer' && isNight
+					? Array.from({ length: 14 }, () => {
+							const x = w * (FOREST_EDGE + 0.05) + Math.random() * w * (1 - FOREST_EDGE - 0.05);
+							return {
+								ax: x,
+								ay: groundY(x) - rand(16, 90),
+								phase: Math.random() * Math.PI * 2,
+								size: rand(1.4, 2.2),
+							};
+						})
+					: [];
+		};
+
+		const buildCamp = () => {
+			const x = w * 0.68;
+			tentPos = { x, base: groundY(x) + 2, s: h / 700 };
+			const fx = x - 64 * tentPos.s;
+			firePos = { x: fx, y: groundY(fx) + 2 };
+			// 炊烟相位错开，开局就是一根连续烟柱
+			smoke = Array.from({ length: 16 }, () => ({
+				x: firePos.x + rand(-3, 3),
+				y: firePos.y - 8,
+				phase: Math.random(),
+			}));
+		};
+
+		const buildWeatherLayers = () => {
+			rainDrops =
+				weather === 'rain'
+					? Array.from({ length: 210 }, () => ({
+							x: Math.random() * (w + 100),
+							y: Math.random() * h, // 作为下落周期的初始偏移
+							vy: rand(8, 13),
+							len: rand(16, 28),
+						}))
+					: [];
+			snowFlakes =
+				weather === 'snow'
+					? Array.from({ length: 100 }, () => ({
+							x: Math.random() * w,
+							y: Math.random() * h,
+							vy: rand(0.6, 1.4),
+							size: rand(1, 3),
+							phase: Math.random() * Math.PI * 2,
+						}))
+					: [];
+			weatherClouds =
+				weather === 'cloudy' || weather === 'rain'
+					? Array.from({ length: weather === 'rain' ? 5 : 6 }, () => ({
+							x: Math.random() * w,
+							y: rand(36, h * 0.26),
+							scale: weather === 'rain' ? rand(1.5, 2.6) : rand(1.2, 2.1),
+							vx: rand(0.12, 0.3),
+						}))
+					: [];
+		};
+
+		// 落叶配色只随季节（不随昼夜），打包进实例缓冲
+		const LEAF_COLORS: Record<string, [number, number, number, number][]> = {
+			autumn: [
+				[0.902, 0.549, 0.235, 0.9],
+				[0.788, 0.329, 0.173, 0.9],
+				[0.91, 0.745, 0.353, 0.9],
+			],
+			spring: [
+				[0.745, 0.902, 0.667, 0.85],
+				[0.941, 0.973, 0.922, 0.85],
+			],
+		};
+		// 云色随昼夜与天气（雨天转灰），打包进实例缓冲；换主题/换天气时需重新打包
+		const cloudGroups = (): CloudGroup[] => [
+			{
+				clouds: ambientClouds,
+				color: isNight
+					? [0.1569, 0.1804, 0.2588, 0.55]
+					: weather === 'rain'
+						? [0.72, 0.75, 0.8, 0.85]
+						: [1, 1, 1, 0.8],
+			},
+			{
+				clouds: weatherClouds,
+				color: isNight
+					? [0.1176, 0.1373, 0.2039, 0.7]
+					: weather === 'rain'
+						? [0.52, 0.56, 0.63, 0.95]
+						: [0.9098, 0.9255, 0.949, 0.9],
+			},
+		];
+
+		const packAll = () => {
+			if (!renderer) return;
+			renderer.packStars(stars);
+			renderer.packGrass(grassBlades);
+			renderer.packLeaves(fallLeaves, LEAF_COLORS[season] ?? LEAF_COLORS.spring);
+			renderer.packClouds(cloudGroups());
+			renderer.packFlame(firePos.x, firePos.y, tentPos.s);
+			renderer.packSmoke(smoke);
+			renderer.packRain(rainDrops.map((r) => ({ x: r.x, vy: r.vy, len: r.len, off: r.y })));
+			renderer.packSnow(snowFlakes);
+			renderer.packFireflies(fireflies);
+		};
+
+		const resize = () => {
+			dpr = Math.min(window.devicePixelRatio || 1, 2); // 封顶 2 以兼顾清晰度与 GPU 填充负载
+			w = window.innerWidth;
+			h = window.innerHeight;
+			canvas.width = w * dpr;
+			canvas.height = h * dpr;
+			ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+			staticCanvas.width = canvas.width;
+			staticCanvas.height = canvas.height;
+			staticDirty = true;
+			buildRidges();
+			buildStars();
+			buildGrass();
+			buildForest();
+			buildLeaves();
+			buildFireflies();
+			buildCamp();
+			buildWeatherLayers();
+			ambientClouds = Array.from({ length: Math.max(5, Math.round(w / 320)) }, () => ({
+				x: Math.random() * w,
+				y: rand(30, h * 0.24),
+				scale: rand(1.0, 1.8),
+				vx: rand(0.1, 0.22),
+			}));
+			packAll();
+			fallbackRender();
+		};
+
+		// ---- 静态层绘制（2D，离屏烘焙） ----
+		const drawSky = () => {
+			const grad = ctx!.createLinearGradient(0, 0, 0, h * 0.68);
+			grad.addColorStop(0, pal().sky);
+			grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+			ctx!.fillStyle = grad;
+			ctx!.fillRect(0, 0, w, h * 0.68);
+		};
+
+		// 日/月本体（静态层）：光晕与圆盘不随时间变化
+		const drawCelestialBody = () => {
+			const cx = w * 0.78;
+			const cy = Math.max(90, h * 0.15);
+			if (!isNight) {
+				const glow = ctx!.createRadialGradient(cx, cy, 0, cx, cy, 130);
+				glow.addColorStop(0, 'rgba(255, 214, 107, 0.45)');
+				glow.addColorStop(1, 'rgba(255, 214, 107, 0)');
+				ctx!.fillStyle = glow;
+				ctx!.fillRect(cx - 130, cy - 130, 260, 260);
+				ctx!.fillStyle = '#ffd66b';
+				ctx!.beginPath();
+				ctx!.arc(cx, cy, 30, 0, Math.PI * 2);
+				ctx!.fill();
+			} else {
+				const glow = ctx!.createRadialGradient(cx, cy, 0, cx, cy, 100);
+				glow.addColorStop(0, 'rgba(223, 230, 255, 0.35)');
+				glow.addColorStop(1, 'rgba(223, 230, 255, 0)');
+				ctx!.fillStyle = glow;
+				ctx!.fillRect(cx - 100, cy - 100, 200, 200);
+				ctx!.fillStyle = '#f2f0e4';
+				ctx!.beginPath();
+				ctx!.arc(cx, cy, 24, 0, Math.PI * 2);
+				ctx!.fill();
+			}
+		};
+
+		const drawRidge = (pts: RidgePoint[], color: string) => {
+			ctx!.fillStyle = color;
+			ctx!.beginPath();
+			ctx!.moveTo(pts[0].x, pts[0].y);
+			for (const p of pts) ctx!.lineTo(p.x, p.y);
+			ctx!.lineTo(w + 60, h);
+			ctx!.lineTo(-60, h);
+			ctx!.closePath();
+			ctx!.fill();
+		};
+
+		// 冬季：远山山顶的积雪帽
+		const drawSnowcaps = () => {
+			ctx!.fillStyle = isNight ? 'rgba(220, 228, 240, 0.45)' : 'rgba(255, 255, 255, 0.9)';
+			for (const p of farRidge) {
+				if (!p.peak) continue;
+				ctx!.beginPath();
+				ctx!.moveTo(p.x - 15, p.y + 13);
+				ctx!.lineTo(p.x, p.y - 1);
+				ctx!.lineTo(p.x + 15, p.y + 13);
+				ctx!.closePath();
+				ctx!.fill();
+			}
+		};
+
+		const fillGround = () => {
+			ctx!.fillStyle = pal().ground;
+			ctx!.beginPath();
+			ctx!.moveTo(0, groundY(0));
+			for (let x = 8; x <= w; x += 8) ctx!.lineTo(x, groundY(x));
+			ctx!.lineTo(w, h);
+			ctx!.lineTo(0, h);
+			ctx!.closePath();
+			ctx!.fill();
+		};
+
+		// 春花：位置与颜色都不随时间变，直接烘进静态层
+		const drawFlowers = () => {
+			if (!flowers.length) return;
+			const colors = isNight
+				? ['rgba(150, 110, 130, 0.8)', 'rgba(140, 140, 150, 0.8)', 'rgba(150, 130, 90, 0.8)']
+				: ['#f6a8c3', '#ffffff', '#f9d976'];
+			flowers.forEach((f, i) => {
+				ctx!.fillStyle = colors[i % 3];
+				ctx!.beginPath();
+				ctx!.arc(f.x, f.y, 2, 0, Math.PI * 2);
+				ctx!.fill();
+			});
+		};
+
+		const drawTree = (tree: FTree) => {
+			const p = pal();
+			const u = tree.s;
+			const H = 150 * u;
+			const noise = (k: number) => {
+				const v = Math.sin(tree.seed * 12.9898 + k * 78.233) * 43758.5453;
+				return v - Math.floor(v);
+			};
+			const widen = 0.85 + 0.3 * noise(3); // 胖瘦
+			const apexLean = (noise(4) - 0.5) * 4 * u; // 顶点微偏
+
+			ctx!.save();
+			ctx!.translate(tree.x, tree.base);
+			ctx!.rotate(tree.lean);
+			ctx!.globalAlpha = ROW_ALPHA[tree.row];
+
+			// 主干：矩形，只露出底部一小截
+			ctx!.fillStyle = p.trunk;
+			ctx!.fillRect(-2 * u, -H * 0.1, 4 * u, H * 0.1);
+
+			// 三层净边三角：上层压住下层，自下而上逐层变亮（光照自上而下）
+			const tiers: { top: number; base: number; halfW: number; color: string }[] = [
+				{ top: -1.0, base: -0.58, halfW: 13, color: p.canopy[2] },
+				{ top: -0.72, base: -0.3, halfW: 18.5, color: p.canopy[0] },
+				{ top: -0.45, base: -0.03, halfW: 24, color: p.canopy[1] },
+			];
+			tiers.forEach((tier, i) => {
+				const cx = apexLean + (noise(10 + i) - 0.5) * 3 * u;
+				const topY = tier.top * H;
+				const baseY = tier.base * H;
+				const hw = tier.halfW * u * widen;
+				ctx!.fillStyle = tier.color;
+				ctx!.beginPath();
+				ctx!.moveTo(cx, topY);
+				ctx!.lineTo(cx - hw, baseY);
+				ctx!.lineTo(cx + hw, baseY);
+				ctx!.closePath();
+				ctx!.fill();
+				if (p.snow) {
+					// 每层顶面的雪三角（波浪底边）
+					ctx!.fillStyle = isNight ? 'rgba(220, 228, 240, 0.45)' : 'rgba(255, 255, 255, 0.9)';
+					const sh = (baseY - topY) * 0.36;
+					ctx!.beginPath();
+					ctx!.moveTo(cx, topY);
+					ctx!.lineTo(cx - hw * 0.38, topY + sh);
+					ctx!.lineTo(cx - hw * 0.12, topY + sh * 0.82);
+					ctx!.lineTo(cx + hw * 0.1, topY + sh);
+					ctx!.lineTo(cx + hw * 0.38, topY + sh * 0.82);
+					ctx!.closePath();
+					ctx!.fill();
+				}
+			});
+			ctx!.restore();
+		};
+
+		// 远 → 中 → 近依次绘制：前排压后排，层叠分明
+		const drawForest = () => {
+			for (let row = 0; row <= 2; row++) {
+				for (const t of forest) if (t.row === row) drawTree(t);
+			}
+		};
+
+		// 帐篷：3/4 视角双面结构，轮廓一律用弧线表现织物张力；
+		// 帐门为叶形开口 + 两侧翻卷帘布，白天天光 shading + 硬切高光，夜晚织物透光 + 帐门泻光
+		const drawTent = () => {
+			const { x, base, s } = tentPos;
+
+			// 3/4 视角顶点：A 前顶 / B 后顶 / C 左前脚 / D 右前脚 / E 后脚
+			const A = { x: x - 6 * s, y: base - 60 * s };
+			const B = { x: x + 26 * s, y: base - 54 * s };
+			const C = { x: x - 46 * s, y: base };
+			const D = { x: x + 2 * s, y: base };
+			const E = { x: x + 52 * s, y: base };
+
+			// 帐门叶形开口：P 门顶 / DL 门左脚 / DR 门右脚；LT / RT 为两侧翻卷帘布的外角
+			const P = { x: x - 12 * s, y: base - 40 * s };
+			const DL = { x: x - 20 * s, y: base };
+			const DR = { x: x - 4 * s, y: base };
+			const LT = { x: x - 25 * s, y: base - 12 * s };
+			const RT = { x: x, y: base - 14 * s };
+
+			// 弧形轮廓轨迹：fill 与 stroke 复用同一套曲线
+			const traceRidge = () => {
+				ctx!.moveTo(A.x, A.y);
+				ctx!.quadraticCurveTo(x + 10 * s, base - 53.5 * s, B.x, B.y); // 屋脊微垂
+			};
+			const traceEdgeCA = () => {
+				ctx!.moveTo(C.x, C.y);
+				ctx!.quadraticCurveTo(x - 33 * s, base - 32 * s, A.x, A.y); // 前缘外鼓
+			};
+			const traceSide = () => {
+				ctx!.moveTo(A.x, A.y);
+				ctx!.quadraticCurveTo(x + 10 * s, base - 53.5 * s, B.x, B.y);
+				ctx!.quadraticCurveTo(x + 46 * s, base - 30 * s, E.x, E.y); // 侧幅外鼓
+				ctx!.quadraticCurveTo(x + 27 * s, base + 3 * s, D.x, D.y); // 底边微垂
+				ctx!.quadraticCurveTo(x + 1 * s, base - 30 * s, A.x, A.y);
+				ctx!.closePath();
+			};
+			const traceFront = () => {
+				ctx!.moveTo(C.x, C.y);
+				ctx!.quadraticCurveTo(x - 33 * s, base - 32 * s, A.x, A.y);
+				ctx!.quadraticCurveTo(x + 1 * s, base - 30 * s, D.x, D.y);
+				ctx!.quadraticCurveTo(x - 22 * s, base + 2.5 * s, C.x, C.y); // 底边微垂
+				ctx!.closePath();
+			};
+			const traceDoor = () => {
+				ctx!.moveTo(DL.x, DL.y);
+				ctx!.quadraticCurveTo(x - 21 * s, base - 21 * s, P.x, P.y);
+				ctx!.quadraticCurveTo(x - 2 * s, base - 21 * s, DR.x, DR.y);
+				ctx!.closePath();
+			};
+			const traceFlapL = () => {
+				ctx!.moveTo(P.x, P.y);
+				ctx!.quadraticCurveTo(x - 22 * s, base - 30 * s, LT.x, LT.y); // 外缘鼓出
+				ctx!.quadraticCurveTo(x - 22 * s, base - 4 * s, DL.x, DL.y); // 内缘收回门脚
+				ctx!.closePath();
+			};
+			const traceFlapR = () => {
+				ctx!.moveTo(P.x, P.y);
+				ctx!.quadraticCurveTo(x - 1 * s, base - 30 * s, RT.x, RT.y);
+				ctx!.quadraticCurveTo(x - 2 * s, base - 5 * s, DR.x, DR.y);
+				ctx!.closePath();
+			};
+
+			// 帐底接触阴影
+			ctx!.fillStyle = isNight ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0.16)';
+			ctx!.beginPath();
+			ctx!.ellipse(x + 4 * s, base + 2 * s, 62 * s, 8 * s, 0, 0, Math.PI * 2);
+			ctx!.fill();
+
+			// 侧面（背光面）
+			const sideGrad = ctx!.createLinearGradient(A.x, A.y, E.x, base);
+			if (isNight) {
+				sideGrad.addColorStop(0, '#4e2d1d');
+				sideGrad.addColorStop(1, '#38200f');
+			} else {
+				sideGrad.addColorStop(0, '#c06438');
+				sideGrad.addColorStop(1, '#9e4e28');
+			}
+			ctx!.fillStyle = sideGrad;
+			ctx!.beginPath();
+			traceSide();
+			ctx!.fill();
+
+			// 前帐面
+			if (isNight) {
+				// 织物透光：亮度以帐门为心向边缘衰减
+				const glow = ctx!.createRadialGradient(
+					x - 10 * s, base - 14 * s, 4 * s,
+					x - 10 * s, base - 14 * s, 52 * s,
+				);
+				glow.addColorStop(0, 'rgba(255, 228, 160, 0.98)');
+				glow.addColorStop(0.55, 'rgba(244, 176, 96, 0.92)');
+				glow.addColorStop(1, 'rgba(198, 112, 54, 0.88)');
+				ctx!.fillStyle = glow;
+			} else {
+				const dayGrad = ctx!.createLinearGradient(A.x, A.y, C.x, base);
+				dayGrad.addColorStop(0, '#e8985f');
+				dayGrad.addColorStop(1, '#cf7340');
+				ctx!.fillStyle = dayGrad;
+			}
+			ctx!.beginPath();
+			traceFront();
+			ctx!.fill();
+
+			// 缝线裁片：侧面由后顶放射两条，前帐面由前顶向门左放射一条
+			ctx!.strokeStyle = isNight ? 'rgba(30, 16, 8, 0.5)' : 'rgba(60, 30, 16, 0.45)';
+			ctx!.lineWidth = 1 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(B.x, B.y);
+			ctx!.quadraticCurveTo(x + 21 * s, base - 27 * s, x + 20 * s, base + 0.5 * s);
+			ctx!.moveTo(B.x, B.y);
+			ctx!.quadraticCurveTo(x + 37 * s, base - 27 * s, x + 38 * s, base + 0.5 * s);
+			ctx!.stroke();
+			ctx!.strokeStyle = isNight ? 'rgba(46, 24, 12, 0.45)' : 'rgba(140, 64, 28, 0.4)';
+			ctx!.beginPath();
+			ctx!.moveTo(A.x, A.y);
+			ctx!.quadraticCurveTo(x - 20 * s, base - 30 * s, x - 31 * s, base + 0.5 * s);
+			ctx!.stroke();
+
+			// 帐门开口
+			ctx!.save();
+			if (isNight) {
+				// 光从开口轮廓上晕出
+				ctx!.shadowColor = 'rgba(255, 214, 138, 0.65)';
+				ctx!.shadowBlur = 12 * s;
+				const doorGlow = ctx!.createRadialGradient(
+					x - 12 * s, base - 8 * s, 2 * s,
+					x - 12 * s, base - 8 * s, 38 * s,
+				);
+				doorGlow.addColorStop(0, 'rgba(255, 238, 190, 1)');
+				doorGlow.addColorStop(0.6, 'rgba(255, 198, 110, 0.95)');
+				doorGlow.addColorStop(1, 'rgba(214, 128, 58, 0.92)');
+				ctx!.fillStyle = doorGlow;
+			} else {
+				const doorGrad = ctx!.createLinearGradient(x - 12 * s, base - 40 * s, x - 12 * s, base);
+				doorGrad.addColorStop(0, '#4a2c1a');
+				doorGrad.addColorStop(1, '#221208');
+				ctx!.fillStyle = doorGrad;
+			}
+			ctx!.beginPath();
+			traceDoor();
+			ctx!.fill();
+			ctx!.restore();
+
+			// 开口内的帐杆与前后杆头小帽
+			ctx!.strokeStyle = isNight ? '#2c1a0e' : '#8a6f52';
+			ctx!.lineWidth = 1.8 * s;
+			ctx!.lineCap = 'round';
+			ctx!.beginPath();
+			ctx!.moveTo(P.x, P.y + 2 * s);
+			ctx!.lineTo(P.x, base);
+			ctx!.stroke();
+			ctx!.fillStyle = isNight ? '#2c1a0e' : '#5a4632';
+			ctx!.beginPath();
+			ctx!.arc(A.x, A.y - 1.5 * s, 1.5 * s, 0, Math.PI * 2);
+			ctx!.moveTo(B.x + 1.3 * s, B.y - 1.2 * s);
+			ctx!.arc(B.x, B.y - 1.2 * s, 1.3 * s, 0, Math.PI * 2);
+			ctx!.fill();
+			ctx!.lineCap = 'butt';
+
+			// 翻卷的门帘：帘布盖在开口两侧，外角以圆扣固定
+			const flapGrad = ctx!.createLinearGradient(0, base - 40 * s, 0, base);
+			if (isNight) {
+				flapGrad.addColorStop(0, '#452817');
+				flapGrad.addColorStop(1, '#311a0e');
+			} else {
+				flapGrad.addColorStop(0, '#b25e33');
+				flapGrad.addColorStop(1, '#8a4424');
+			}
+			ctx!.fillStyle = flapGrad;
+			ctx!.beginPath();
+			traceFlapL();
+			ctx!.fill();
+			ctx!.beginPath();
+			traceFlapR();
+			ctx!.fill();
+			// 帘布卷边的受光棱线
+			ctx!.strokeStyle = isNight ? 'rgba(255, 200, 130, 0.3)' : 'rgba(255, 216, 164, 0.4)';
+			ctx!.lineWidth = 1 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(P.x, P.y);
+			ctx!.quadraticCurveTo(x - 22 * s, base - 30 * s, LT.x, LT.y);
+			ctx!.moveTo(P.x, P.y);
+			ctx!.quadraticCurveTo(x - 1 * s, base - 30 * s, RT.x, RT.y);
+			ctx!.stroke();
+			// 帘布外角的固定圆扣（两个圆之间要 moveTo 断开，否则会描出连线）
+			ctx!.fillStyle = isNight ? '#241408' : '#6b3a20';
+			ctx!.beginPath();
+			ctx!.arc(LT.x, LT.y, 1.8 * s, 0, Math.PI * 2);
+			ctx!.moveTo(RT.x + 1.5 * s, RT.y);
+			ctx!.arc(RT.x, RT.y, 1.5 * s, 0, Math.PI * 2);
+			ctx!.fill();
+			ctx!.strokeStyle = 'rgba(0, 0, 0, 0.25)';
+			ctx!.lineWidth = 0.8 * s;
+			ctx!.beginPath();
+			ctx!.arc(LT.x, LT.y, 1.8 * s, 0, Math.PI * 2);
+			ctx!.moveTo(RT.x + 1.5 * s, RT.y);
+			ctx!.arc(RT.x, RT.y, 1.5 * s, 0, Math.PI * 2);
+			ctx!.stroke();
+
+			if (isNight) {
+				// 帐门泻出的光束：梯形本体 + 几何边缘辉光
+				ctx!.save();
+				ctx!.shadowColor = 'rgba(255, 200, 110, 0.55)';
+				ctx!.shadowBlur = 28 * s;
+				const beam = ctx!.createLinearGradient(x, base - 4 * s, x, base + 16 * s);
+				beam.addColorStop(0, 'rgba(255, 216, 134, 0.55)');
+				beam.addColorStop(1, 'rgba(255, 208, 122, 0)');
+				ctx!.fillStyle = beam;
+				ctx!.beginPath();
+				// 起自开口下沿（与门底同宽），向下展开落到地面
+				ctx!.moveTo(x - 18 * s, base - 4 * s);
+				ctx!.lineTo(x - 6 * s, base - 4 * s);
+				ctx!.lineTo(x + 12 * s, base + 16 * s);
+				ctx!.lineTo(x - 40 * s, base + 16 * s);
+				ctx!.closePath();
+				ctx!.fill();
+				ctx!.restore();
+				// 门前光池：压扁椭圆 + 边缘辉光
+				ctx!.save();
+				ctx!.translate(x - 14 * s, base + 7 * s);
+				ctx!.scale(1, 0.22);
+				ctx!.shadowColor = 'rgba(255, 196, 100, 0.5)';
+				ctx!.shadowBlur = 20 * s;
+				const pool = ctx!.createRadialGradient(0, 0, 0, 0, 0, 55 * s);
+				pool.addColorStop(0, 'rgba(255, 200, 106, 0.4)');
+				pool.addColorStop(1, 'rgba(255, 200, 106, 0)');
+				ctx!.fillStyle = pool;
+				ctx!.beginPath();
+				ctx!.arc(0, 0, 55 * s, 0, Math.PI * 2);
+				ctx!.fill();
+				ctx!.restore();
+				// 轮廓微光：前缘与屋脊的细高光
+				ctx!.strokeStyle = 'rgba(255, 222, 168, 0.5)';
+				ctx!.lineWidth = 1.2 * s;
+				ctx!.beginPath();
+				traceEdgeCA();
+				ctx!.stroke();
+				ctx!.strokeStyle = 'rgba(255, 222, 168, 0.3)';
+				ctx!.beginPath();
+				traceRidge();
+				ctx!.stroke();
+			} else {
+				// 白天硬切高光：前缘亮条 + 屋脊亮条
+				ctx!.strokeStyle = 'rgba(255, 216, 164, 0.5)';
+				ctx!.lineWidth = 2.2 * s;
+				ctx!.beginPath();
+				traceEdgeCA();
+				ctx!.stroke();
+				ctx!.strokeStyle = 'rgba(255, 216, 164, 0.35)';
+				ctx!.lineWidth = 2 * s;
+				ctx!.beginPath();
+				traceRidge();
+				ctx!.stroke();
+			}
+
+			// 风绳（微垂弧线）与地钉（斜插入土，绳结打在钉腰）
+			const G1 = { x: x - 70 * s, y: base + 4 * s };
+			const G2 = { x: x + 74 * s, y: base + 4 * s };
+			ctx!.strokeStyle = isNight ? 'rgba(20, 14, 10, 0.7)' : 'rgba(74, 50, 32, 0.55)';
+			ctx!.lineWidth = 1.3 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(A.x, A.y);
+			ctx!.quadraticCurveTo(x - 38 * s, base - 24 * s, G1.x, G1.y);
+			ctx!.moveTo(B.x, B.y);
+			ctx!.quadraticCurveTo(x + 50 * s, base - 21 * s, G2.x, G2.y);
+			ctx!.stroke();
+			ctx!.strokeStyle = isNight ? '#140e0a' : '#4a3220';
+			ctx!.lineWidth = 2.2 * s;
+			ctx!.lineCap = 'round';
+			ctx!.beginPath();
+			ctx!.moveTo(x - 69 * s, base + 1 * s);
+			ctx!.lineTo(x - 72 * s, base + 7 * s);
+			ctx!.moveTo(x + 73 * s, base + 1 * s);
+			ctx!.lineTo(x + 76 * s, base + 7 * s);
+			ctx!.stroke();
+			ctx!.fillStyle = isNight ? '#140e0a' : '#4a3220';
+			ctx!.beginPath();
+			ctx!.arc(G1.x, G1.y, 1.3 * s, 0, Math.PI * 2);
+			ctx!.arc(G2.x, G2.y, 1.3 * s, 0, Math.PI * 2);
+			ctx!.fill();
+			ctx!.lineCap = 'butt';
+		};
+
+		// 篝火烹饪角：石圈火床 + 交叉木柴 + 捆扎三脚架 + 链条 S 钩吊圆肚锅。
+		// 动态火焰合成在静态层之上，锅底落在火焰上沿处，自然形成火焰舔锅；
+		// 炊烟从锅底升起，读作火烟绕锅
+		const drawCampfire = () => {
+			const { x: fx, y: fy } = firePos;
+			const s = tentPos.s;
+
+			// 火床接触阴影
+			ctx!.fillStyle = isNight ? 'rgba(0, 0, 0, 0.35)' : 'rgba(0, 0, 0, 0.16)';
+			ctx!.beginPath();
+			ctx!.ellipse(fx, fy + 2 * s, 16 * s, 3.5 * s, 0, 0, Math.PI * 2);
+			ctx!.fill();
+
+			if (isNight) {
+				// 炭火红光：垫在石圈与木柴之下，与动态火焰叠加出层次
+				const ember = ctx!.createRadialGradient(fx, fy - 1 * s, 0, fx, fy - 1 * s, 14 * s);
+				ember.addColorStop(0, 'rgba(255, 140, 50, 0.5)');
+				ember.addColorStop(1, 'rgba(255, 140, 50, 0)');
+				ctx!.fillStyle = ember;
+				ctx!.beginPath();
+				ctx!.arc(fx, fy - 1 * s, 14 * s, 0, Math.PI * 2);
+				ctx!.fill();
+			}
+
+			// 三脚架：两前腿一后腿（后腿浅一档拉开纵深），杆头露出捆扎结之上
+			ctx!.lineCap = 'round';
+			ctx!.lineWidth = 2 * s;
+			ctx!.strokeStyle = isNight ? '#1c130c' : '#7a6450';
+			ctx!.beginPath();
+			ctx!.moveTo(fx + 0.3 * s, fy - 35.5 * s);
+			ctx!.lineTo(fx + 6 * s, fy + 3 * s);
+			ctx!.stroke();
+			ctx!.strokeStyle = isNight ? '#2a1e14' : '#5a4632';
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 1.2 * s, fy - 36 * s);
+			ctx!.lineTo(fx - 15 * s, fy + 1 * s);
+			ctx!.moveTo(fx + 1.2 * s, fy - 36 * s);
+			ctx!.lineTo(fx + 15 * s, fy + 1 * s);
+			ctx!.stroke();
+			// 顶端捆扎结
+			ctx!.strokeStyle = isNight ? '#181008' : '#43301f';
+			ctx!.lineWidth = 1.2 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 2.6 * s, fy - 35.2 * s);
+			ctx!.lineTo(fx + 2.6 * s, fy - 35.2 * s);
+			ctx!.moveTo(fx - 2.6 * s, fy - 33.5 * s);
+			ctx!.lineTo(fx + 2.6 * s, fy - 33.5 * s);
+			ctx!.moveTo(fx - 2.6 * s, fy - 31.8 * s);
+			ctx!.lineTo(fx + 2.6 * s, fy - 31.8 * s);
+			ctx!.stroke();
+
+			// 吊挂：大尺度画 3 节链环，小尺度退化为一根线（避免亚像素糊成虚线）
+			ctx!.strokeStyle = isNight ? '#16161a' : '#4a4a52';
+			if (s >= 0.9) {
+				ctx!.lineWidth = 0.9 * s;
+				ctx!.beginPath();
+				ctx!.ellipse(fx, fy - 29.7 * s, 0.85 * s, 1.3 * s, 0, 0, Math.PI * 2);
+				ctx!.ellipse(fx, fy - 27.9 * s, 0.85 * s, 1.3 * s, Math.PI / 2, 0, Math.PI * 2);
+				ctx!.ellipse(fx, fy - 26.4 * s, 0.85 * s, 1.3 * s, 0, 0, Math.PI * 2);
+				ctx!.stroke();
+			} else {
+				ctx!.lineWidth = 1 * s;
+				ctx!.beginPath();
+				ctx!.moveTo(fx, fy - 31 * s);
+				ctx!.lineTo(fx, fy - 26.2 * s);
+				ctx!.stroke();
+			}
+			// S 钩：钩弯兜住提手弧顶
+			ctx!.lineWidth = 0.9 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(fx, fy - 26.2 * s);
+			ctx!.quadraticCurveTo(fx + 1.5 * s, fy - 25 * s, fx + 0.8 * s, fy - 23.8 * s);
+			ctx!.quadraticCurveTo(fx + 0.2 * s, fy - 22.8 * s, fx - 0.8 * s, fy - 23.8 * s);
+			ctx!.stroke();
+
+			// 圆肚吊锅：罐身收口，锅底悬在火焰上沿（fy-10.2s）让火焰刚好舔到锅底
+			const tracePotBody = () => {
+				ctx!.moveTo(fx - 5.8 * s, fy - 20.5 * s);
+				ctx!.quadraticCurveTo(fx - 8.5 * s, fy - 14.5 * s, fx, fy - 10.2 * s); // 左肚到底
+				ctx!.quadraticCurveTo(fx + 8.5 * s, fy - 14.5 * s, fx + 5.8 * s, fy - 20.5 * s); // 右肚收回
+				ctx!.quadraticCurveTo(fx, fy - 18.6 * s, fx - 5.8 * s, fy - 20.5 * s); // 罐口后沿
+				ctx!.closePath();
+			};
+			const potGrad = ctx!.createLinearGradient(fx, fy - 21 * s, fx, fy - 10 * s);
+			if (isNight) {
+				potGrad.addColorStop(0, '#1a1a1e');
+				potGrad.addColorStop(1, '#101013');
+			} else {
+				potGrad.addColorStop(0, '#45454c');
+				potGrad.addColorStop(1, '#2c2c31');
+			}
+			ctx!.fillStyle = potGrad;
+			ctx!.beginPath();
+			tracePotBody();
+			ctx!.fill();
+			if (isNight) {
+				// 火光自锅底向上染：裁剪到罐身内做暖色下照
+				ctx!.save();
+				ctx!.beginPath();
+				tracePotBody();
+				ctx!.clip();
+				const warm = ctx!.createLinearGradient(fx, fy - 16 * s, fx, fy - 9 * s);
+				warm.addColorStop(0, 'rgba(255, 130, 45, 0)');
+				warm.addColorStop(1, 'rgba(255, 130, 45, 0.4)');
+				ctx!.fillStyle = warm;
+				ctx!.fillRect(fx - 9 * s, fy - 21 * s, 18 * s, 12 * s);
+				ctx!.restore();
+				// 锅肚下缘的暖色 rim light
+				ctx!.strokeStyle = 'rgba(255, 150, 60, 0.5)';
+				ctx!.lineWidth = 1.1 * s;
+				ctx!.beginPath();
+				ctx!.moveTo(fx - 5.8 * s, fy - 20.5 * s);
+				ctx!.quadraticCurveTo(fx - 8.5 * s, fy - 14.5 * s, fx, fy - 10.2 * s);
+				ctx!.quadraticCurveTo(fx + 8.5 * s, fy - 14.5 * s, fx + 5.8 * s, fy - 20.5 * s);
+				ctx!.stroke();
+			} else {
+				// 白天硬切高光：左肚一条冷色亮棱
+				ctx!.strokeStyle = 'rgba(210, 220, 235, 0.4)';
+				ctx!.lineWidth = 1.2 * s;
+				ctx!.beginPath();
+				ctx!.moveTo(fx - 5.8 * s, fy - 20.5 * s);
+				ctx!.quadraticCurveTo(fx - 8.5 * s, fy - 14.5 * s, fx, fy - 10.2 * s);
+				ctx!.stroke();
+			}
+			// 锅盖（浅拱盖 + 盖钮）与锅耳、提手
+			ctx!.fillStyle = isNight ? '#202026' : '#4a4a52';
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 6.4 * s, fy - 21.8 * s);
+			ctx!.quadraticCurveTo(fx, fy - 26.2 * s, fx + 6.4 * s, fy - 21.8 * s);
+			ctx!.quadraticCurveTo(fx, fy - 20.9 * s, fx - 6.4 * s, fy - 21.8 * s);
+			ctx!.closePath();
+			ctx!.fill();
+			ctx!.fillStyle = isNight ? '#101013' : '#2c2c31';
+			ctx!.beginPath();
+			ctx!.arc(fx, fy - 25.2 * s, 0.9 * s, 0, Math.PI * 2);
+			ctx!.moveTo(fx - 5.6 * s, fy - 20.6 * s);
+			ctx!.arc(fx - 6.6 * s, fy - 20.6 * s, 1 * s, 0, Math.PI * 2);
+			ctx!.moveTo(fx + 7.6 * s, fy - 20.6 * s);
+			ctx!.arc(fx + 6.6 * s, fy - 20.6 * s, 1 * s, 0, Math.PI * 2);
+			ctx!.fill();
+			ctx!.strokeStyle = isNight ? '#16161a' : '#4a4a52';
+			ctx!.lineWidth = 0.9 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 6.6 * s, fy - 20.6 * s);
+			ctx!.quadraticCurveTo(fx, fy - 29.5 * s, fx + 6.6 * s, fy - 20.6 * s);
+			ctx!.stroke();
+
+			// 石圈：后侧两块垫在柴下，前侧四块压住柴端
+			const stoneColors = isNight
+				? ['#2c313a', '#262b33', '#333945']
+				: ['#8d887b', '#7c776b', '#969183'];
+			const stones: [number, number, number, number, boolean][] = [
+				// x 偏移 / y 偏移 / 半径 / 旋转 / 是否前排
+				[-12.2, -2.4, 2.2, 0.3, false],
+				[12.2, -2.4, 2.2, -0.3, false],
+				[12.2, 0.4, 2.5, 0.2, true],
+				[6.5, 2.5, 2.3, -0.2, true],
+				[-3.4, 2.9, 2.7, 0.1, true],
+				[-11.3, 1, 2.4, -0.1, true],
+			];
+			const drawStones = (front: boolean) => {
+				stones.forEach(([ox, oy, r, rot, isFront], i) => {
+					if (isFront !== front) return;
+					ctx!.fillStyle = stoneColors[i % stoneColors.length];
+					ctx!.beginPath();
+					ctx!.ellipse(fx + ox * s, fy + oy * s, r * s, r * 0.78 * s, rot, 0, Math.PI * 2);
+					ctx!.fill();
+				});
+			};
+			drawStones(false);
+
+			// 交叉木柴：圆角柴段 + 端面年轮 + 树皮纹理
+			ctx!.strokeStyle = isNight ? '#241a10' : '#6b4a2f';
+			ctx!.lineWidth = 3 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 9 * s, fy - 0.5 * s);
+			ctx!.lineTo(fx + 9 * s, fy - 4.5 * s);
+			ctx!.moveTo(fx - 8 * s, fy - 4.8 * s);
+			ctx!.lineTo(fx + 8 * s, fy - 1 * s);
+			ctx!.stroke();
+			// 端面（朝向观者的两端）：浅色断面 + 深色年轮环
+			ctx!.fillStyle = isNight ? '#3a2c1c' : '#8a6a45';
+			ctx!.beginPath();
+			ctx!.arc(fx - 9 * s, fy - 0.5 * s, 1.5 * s, 0, Math.PI * 2);
+			ctx!.moveTo(fx + 9.5 * s, fy - 1 * s);
+			ctx!.arc(fx + 8 * s, fy - 1 * s, 1.5 * s, 0, Math.PI * 2);
+			ctx!.fill();
+			ctx!.strokeStyle = isNight ? '#1c130a' : '#5a3d24';
+			ctx!.lineWidth = 0.6 * s;
+			ctx!.beginPath();
+			ctx!.arc(fx - 9 * s, fy - 0.5 * s, 0.8 * s, 0, Math.PI * 2);
+			ctx!.moveTo(fx + 8.8 * s, fy - 1 * s);
+			ctx!.arc(fx + 8 * s, fy - 1 * s, 0.8 * s, 0, Math.PI * 2);
+			ctx!.stroke();
+			// 树皮短纹理
+			ctx!.lineWidth = 0.8 * s;
+			ctx!.beginPath();
+			ctx!.moveTo(fx - 4 * s, fy - 1.8 * s);
+			ctx!.lineTo(fx - 1 * s, fy - 2.4 * s);
+			ctx!.moveTo(fx + 3 * s, fy - 3.6 * s);
+			ctx!.lineTo(fx + 6 * s, fy - 4.1 * s);
+			ctx!.stroke();
+
+			if (isNight) {
+				// 炭火余烬：带辉光的暖橙碎点
+				ctx!.save();
+				ctx!.shadowColor = 'rgba(255, 120, 40, 0.8)';
+				ctx!.shadowBlur = 6 * s;
+				ctx!.fillStyle = 'rgba(255, 120, 40, 0.9)';
+				ctx!.beginPath();
+				ctx!.arc(fx - 3.5 * s, fy - 2.5 * s, 0.8 * s, 0, Math.PI * 2);
+				ctx!.moveTo(fx + 2.3 * s, fy - 3.2 * s);
+				ctx!.arc(fx + 1.5 * s, fy - 3.2 * s, 0.7 * s, 0, Math.PI * 2);
+				ctx!.moveTo(fx + 5.7 * s, fy - 2 * s);
+				ctx!.arc(fx + 5 * s, fy - 2 * s, 0.8 * s, 0, Math.PI * 2);
+				ctx!.moveTo(fx - 5.8 * s, fy - 1.8 * s);
+				ctx!.arc(fx - 6.5 * s, fy - 1.8 * s, 0.7 * s, 0, Math.PI * 2);
+				ctx!.fill();
+				ctx!.restore();
+			}
+
+			drawStones(true);
+			ctx!.lineCap = 'butt';
+		};
+
+		// 无 WebGL2 回退时，把直立的草一并烘进静态层（动态模式下草由 WebGL 逐帧摆动绘制）
+		const drawGrassStatic = () => {
+			if (!grassBlades.length) return;
+			ctx!.lineWidth = 1.6;
+			for (const shade of [0, 1]) {
+				ctx!.strokeStyle = pal().grass[shade];
+				ctx!.beginPath();
+				for (const b of grassBlades) {
+					if (b.shade !== shade) continue;
+					ctx!.moveTo(b.x, b.y);
+					ctx!.quadraticCurveTo(b.x, b.y - b.len * 0.6, b.x, b.y - b.len);
+				}
+				ctx!.stroke();
+			}
+		};
+
+		// 静态层重绘：不变的景物画到离屏 canvas（临时切换 ctx 复用全部绘制函数），
+		// WebGL 模式下随即上传为纹理
+		const renderStatic = () => {
+			if (!sctx) return;
+			sctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+			sctx.clearRect(0, 0, w, h);
+			const mainCtx = ctx;
+			ctx = sctx;
+			drawSky();
+			drawCelestialBody();
+			drawRidge(farRidge, pal().far);
+			if (season === 'winter') drawSnowcaps();
+			drawRidge(nearRidge, pal().near);
+			fillGround();
+			drawFlowers();
+			drawForest();
+			drawTent();
+			drawCampfire();
+			if (!renderer) drawGrassStatic();
+			ctx = mainCtx;
+			staticDirty = false;
+			renderer?.uploadStatic(staticCanvas);
+		};
+
+		// 每帧（WebGL）：一次全屏三角形合成 + 若干实例化绘制
+		let t0: number | null = null;
+		let windDist = 0; // 云层漂移积分（帧单位），着色器里做环绕
+		const render = (t: number) => {
+			if (!renderer) return;
+			if (staticDirty) renderStatic();
+			const p = pal();
+			renderer.render({
+				t: t - (t0 ?? 0),
+				w,
+				h,
+				dpr,
+				night: isNight,
+				weather,
+				windDist,
+				amp: weather === 'windy' ? 9 + 4 * Math.sin(t * 0.0012) : 3,
+				flick: 1 + 0.25 * Math.sin(t * 0.02) + 0.1 * Math.sin(t * 0.047),
+				windK: weather === 'windy' ? 2.5 : 1,
+				drift: weather === 'windy' ? 171 : 42,
+				grassA: p.grass[0],
+				grassB: p.grass[1],
+			});
+		};
+
+		// 无 WebGL2 时的退化路径：只画静态画面，不启动动画循环
+		const fallbackRender = () => {
+			if (!fbCtx) return;
+			if (staticDirty) renderStatic();
+			fbCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+			fbCtx.clearRect(0, 0, w, h);
+			fbCtx.drawImage(staticCanvas, 0, 0, w, h);
+		};
+
+		const renderOnce = () => {
+			if (renderer) render(0);
+			else fallbackRender();
+		};
+
+		const rollWeather = () => {
+			if (WEATHER_OVERRIDE) return;
+			const pool = WEATHER_POOL[season].filter((item) => item !== weather);
+			weather = pool[Math.floor(Math.random() * pool.length)];
+			buildWeatherLayers();
+			if (renderer) {
+				renderer.packClouds(cloudGroups());
+				renderer.packRain(rainDrops.map((r) => ({ x: r.x, vy: r.vy, len: r.len, off: r.y })));
+				renderer.packSnow(snowFlakes);
+			}
+			updateChip();
+			fallbackRender();
+		};
+		const scheduleWeather = () => {
+			if (WEATHER_OVERRIDE) return;
+			window.setTimeout(
+				() => {
+					rollWeather();
+					scheduleWeather();
+				},
+				rand(WEATHER_MIN_MINUTES, WEATHER_MAX_MINUTES) * 60000,
+			);
+		};
+
+		// 季节轮换：切到下一季，重建季节相关实体；天气在新季节不合法则重摇
+		const rebuildSeasonal = () => {
+			buildGrass();
+			buildLeaves();
+			buildFireflies();
+			buildWeatherLayers();
+			staticDirty = true;
+			packAll();
+			fallbackRender();
+		};
+		const rotateSeason = () => {
+			if (SEASON_OVERRIDE) return;
+			season = SEASONS[(SEASONS.indexOf(season) + 1) % 4];
+			if (!WEATHER_POOL[season].includes(weather)) {
+				weather = WEATHER_POOL[season][Math.floor(Math.random() * WEATHER_POOL[season].length)];
+			}
+			rebuildSeasonal();
+			updateChip();
+		};
+		const scheduleSeason = () => {
+			if (SEASON_OVERRIDE) return;
+			window.setTimeout(() => {
+				rotateSeason();
+				scheduleSeason();
+			}, SEASON_ROTATE_MINUTES * 60000);
+		};
+
+		if (!WEATHER_OVERRIDE) {
+			const pool = WEATHER_POOL[season];
+			weather = pool[Math.floor(Math.random() * pool.length)];
+		}
+
+		new MutationObserver(() => {
+			isNight = document.documentElement.dataset.theme === 'dark';
+			buildFireflies();
+			staticDirty = true;
+			updateChip();
+			if (renderer) {
+				renderer.packFireflies(fireflies);
+				renderer.packClouds(cloudGroups());
+			}
+			if (reduced) renderOnce();
+			else fallbackRender();
+		}).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+
+		resize();
+		window.addEventListener('resize', resize);
+		updateChip();
+		scheduleWeather();
+		scheduleSeason();
+
+		// dtK 为时间补偿系数，动画速度不随帧率变化
+		let dtK = 1;
+		// 背景场景 30fps 足够：运动速度由 dtK / 着色器时间函数保证，开销减半
+		const FRAME_MS = 1000 / 30;
+		let lastT = -FRAME_MS;
+		let animationId = 0;
+		let isPageVisible = !document.hidden;
+
+		// 页面可见性变化时暂停/恢复动画
+		document.addEventListener('visibilitychange', () => {
+			isPageVisible = !document.hidden;
+			if (!isPageVisible) {
+				// 页面隐藏时取消动画循环
+				if (animationId) {
+					cancelAnimationFrame(animationId);
+					animationId = 0;
+				}
+			} else if (!reduced && renderer) {
+				// 页面显示时恢复动画
+				lastT = performance.now() - FRAME_MS;
+				const loop = (t: number) => {
+					if (!isPageVisible) return;
+					if (t - lastT >= FRAME_MS) {
+						dtK = Math.min((t - lastT) / 16.67, 3);
+						lastT = t;
+						if (t0 === null) t0 = t;
+						windDist += (weather === 'windy' ? 2.5 : 1) * dtK;
+						render(t);
+					}
+					animationId = requestAnimationFrame(loop);
+				};
+				animationId = requestAnimationFrame(loop);
+			}
+		});
+
+		if (reduced || !renderer) {
+			renderOnce();
+		} else {
+			const loop = (t: number) => {
+				if (!isPageVisible) return;
+				if (t - lastT >= FRAME_MS) {
+					dtK = Math.min((t - lastT) / 16.67, 3);
+					lastT = t;
+					if (t0 === null) t0 = t;
+					windDist += (weather === 'windy' ? 2.5 : 1) * dtK;
+					render(t);
+				}
+				animationId = requestAnimationFrame(loop);
+			};
+			animationId = requestAnimationFrame(loop);
+		}
+	}
+</script>

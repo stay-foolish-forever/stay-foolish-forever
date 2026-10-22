@@ -1,0 +1,12 @@
+# 生产环境 Caddy 配置：主站 learn-forever.xyz，www 重定向到主域名
+# 服务器路径 /var/homepage/Caddyfile，由 Docker 容器挂载到 /etc/caddy/Caddyfile
+# root 必须与 GitHub Actions 变量 vars.DEPLOY_PATH 一致（站点目录以相同绝对路径只读挂载进容器）
+learn-forever.xyz {
+	root * /var/homepage/root
+	encode zstd gzip
+	file_server
+}
+
+www.learn-forever.xyz {
+	redir https://learn-forever.xyz{uri} permanent
+}

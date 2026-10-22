@@ -1,0 +1,20 @@
+# Caddy 反代容器：只读挂载站点目录与 Caddyfile，证书数据持久化到命名卷
+# 服务器路径 /var/homepage/docker-compose.yml，更新配置后执行 docker compose up -d 生效
+services:
+  caddy:
+    image: caddy:2
+    container_name: caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - /var/homepage/Caddyfile:/etc/caddy/Caddyfile:ro
+      - /var/homepage/root:/var/homepage/root:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

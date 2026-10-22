@@ -1,0 +1,37 @@
+---
+import { Image } from 'astro:assets';
+import avatar from '../assets/logo.png';
+import Layout from '../layouts/BlogPost.astro';
+---
+
+<Layout
+	title="关于我"
+	description="关于张耒"
+	pubDate={new Date('September 24 2026')}
+	centered
+>
+	<p class="avatar">
+		<Image src={avatar} alt="张耒的头像：一只困得睁不开眼的猫" width={320} height={320} />
+	</p>
+	<p>
+		我是<strong>张耒</strong>（Lei Zhang），一个写代码的人。
+	</p>
+	<p>
+		这个网站是我的随笔本：记录研究里的想法、折腾过的工具、读过的书，以及偶尔的生活片段。更新不定，随性而写。
+	</p>
+	<p>
+		可以在 <a href="https://github.com/stay-foolish-forever" target="_blank">GitHub</a>{' '}
+		找到我。
+	</p>
+</Layout>
+
+<style>
+	.avatar {
+		text-align: center;
+	}
+	.avatar img {
+		width: 150px;
+		height: 150px;
+		border-radius: 50%;
+	}
+</style>

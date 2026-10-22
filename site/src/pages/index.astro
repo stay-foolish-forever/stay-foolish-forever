@@ -1,0 +1,77 @@
+---
+import { getCollection } from 'astro:content';
+import BaseHead from '../components/BaseHead.astro';
+import Footer from '../components/Footer.astro';
+import FormattedDate from '../components/FormattedDate.astro';
+import Header from '../components/Header.astro';
+import SeasonScene from '../components/SeasonScene.astro';
+import { SITE_DESCRIPTION, SITE_TITLE } from '../consts';
+
+const posts = (await getCollection('blog'))
+	.sort((a, b) => b.data.pubDate.valueOf() - a.data.pubDate.valueOf())
+	.slice(0, 5);
+---
+
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<BaseHead title={SITE_TITLE} description={SITE_DESCRIPTION} />
+		<style>
+			.hero {
+				padding: 2em 0 1em;
+			}
+			.hero h1 {
+				font-size: 2.6em;
+				margin-bottom: 0.25em;
+			}
+			.hero-links {
+				font-size: 0.95em;
+			}
+			.hero-links a {
+				margin-right: 1.2em;
+			}
+			.recent h2 {
+				font-size: 1.3em;
+				margin: 2.5em 0 0.5em;
+			}
+			.more {
+				font-size: 0.9em;
+			}
+		</style>
+	</head>
+	<body>
+		<Header />
+		<SeasonScene />
+		<main>
+			<section class="hero">
+				<h1>张耒</h1>
+				<p>写代码，也写随笔。这里记录我的研究、折腾与生活。</p>
+				<p class="hero-links">
+					<a href="/blog">随笔</a>
+					<a href="/about">关于</a>
+					<a href="https://github.com/stay-foolish-forever" target="_blank">GitHub</a>
+					<a href="/rss.xml">RSS</a>
+				</p>
+			</section>
+			<section class="recent">
+				<h2>最近更新</h2>
+				<ul class="post-list">
+					{
+						posts.map((post) => (
+							<li>
+								<a href={`/blog/${post.id}/`}>{post.data.title}</a>
+								<time>
+									<FormattedDate date={post.data.pubDate} />
+								</time>
+							</li>
+						))
+					}
+				</ul>
+				<p>
+					<a class="more" href="/blog">全部文章 →</a>
+				</p>
+			</section>
+		</main>
+		<Footer />
+	</body>
+</html>

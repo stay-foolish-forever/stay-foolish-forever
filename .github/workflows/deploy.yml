@@ -1,0 +1,47 @@
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - name: Install dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build
+        working-directory: site
+        run: npm run build
+
+      # 需要在仓库设置中配置：
+      #   Secrets: DEPLOY_SSH_KEY  —— 有部署目录写权限的 SSH 私钥
+      #   Variables: DEPLOY_HOST / DEPLOY_USER / DEPLOY_PATH（可选 DEPLOY_PORT，默认 22）
+      - name: Deploy dist/ to server via rsync
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH }}
+        run: |
+          install -m 600 -D <(printf '%s\n' "$DEPLOY_SSH_KEY") ~/.ssh/id_ed25519
+          ssh-keyscan -p "$DEPLOY_PORT" -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          rsync -az --delete --mkpath -e "ssh -p $DEPLOY_PORT -i ~/.ssh/id_ed25519" \
+            site/dist/ "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PATH"

@@ -1,0 +1,133 @@
+---
+const today = new Date();
+---
+
+<footer id="site-footer" inert>
+	<p>
+		&copy; {today.getFullYear()} 张耒 ·{' '}
+		<a href="https://github.com/stay-foolish-forever" target="_blank">GitHub</a> ·{' '}
+		<a href="/rss.xml">RSS</a> · 由 <a href="https://astro.build" target="_blank">Astro</a> 驱动
+	</p>
+</footer>
+<style>
+	footer {
+		position: fixed;
+		left: 0;
+		right: 0;
+		bottom: 0;
+		/* 沉到背景画布（z-index: -1）之下：页脚始终就在这里，被画布幕布遮住；
+		   抽屉打开时前景上移，它被原地露出，自身无任何动画 */
+		z-index: -2;
+		padding: 1.2em 1em;
+		border-top: 1px solid var(--border);
+		background: color-mix(in srgb, var(--bg) 82%, transparent);
+		backdrop-filter: blur(18px) saturate(1.6);
+		-webkit-backdrop-filter: blur(18px) saturate(1.6);
+		text-align: center;
+		color: var(--muted);
+		font-size: 0.85em;
+	}
+	footer p {
+		margin: 0;
+	}
+	footer a {
+		color: var(--muted);
+		text-decoration: none;
+		transition: color 0.2s ease;
+	}
+	footer a:hover {
+		color: var(--accent);
+		text-decoration: none;
+	}
+</style>
+<script>
+	const footer = document.getElementById('site-footer');
+
+	if (footer) {
+		let open = false;
+		// armed：已停在页面底部片刻。防止滚到底的惯性直接把抽屉带出来，
+		// 必须「到底 → 停顿 → 再向下滚一下」才触发
+		let armed = false;
+		let armTimer: number | undefined;
+
+		const atBottom = () =>
+			window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 2;
+
+		const setOpen = (next: boolean) => {
+			open = next;
+			footer.classList.toggle('open', open);
+			footer.toggleAttribute('inert', !open);
+			document.body.classList.toggle('footer-open', open);
+		};
+
+		// 前景上移距离 = 页脚实际高度，写入 CSS 变量供 global.css 使用
+		const syncFooterHeight = () =>
+			document.documentElement.style.setProperty('--footer-h', `${footer.offsetHeight}px`);
+		window.addEventListener('resize', syncFooterHeight);
+		syncFooterHeight();
+
+		const scheduleArm = () => {
+			window.clearTimeout(armTimer);
+			armTimer = window.setTimeout(() => {
+				armed = true;
+			}, 250);
+		};
+
+		const disarm = () => {
+			armed = false;
+			window.clearTimeout(armTimer);
+		};
+
+		// 位置不再变化（已停到底部）250ms 后才武装；离开底部立即复位并收起抽屉
+		window.addEventListener(
+			'scroll',
+			() => {
+				if (atBottom()) {
+					scheduleArm();
+				} else {
+					disarm();
+					if (open) setOpen(false);
+				}
+			},
+			{ passive: true },
+		);
+
+		window.addEventListener(
+			'wheel',
+			(e) => {
+				if (e.deltaY > 0 && !open && armed && atBottom()) setOpen(true);
+				else if (e.deltaY < 0 && open) setOpen(false);
+			},
+			{ passive: true },
+		);
+
+		let touchY = 0;
+		window.addEventListener(
+			'touchstart',
+			(e) => {
+				touchY = e.touches[0].clientY;
+			},
+			{ passive: true },
+		);
+		window.addEventListener(
+			'touchmove',
+			(e) => {
+				const dy = touchY - e.touches[0].clientY;
+				if (dy > 24 && !open && armed && atBottom()) setOpen(true);
+				else if (dy < -24 && open) setOpen(false);
+			},
+			{ passive: true },
+		);
+
+		window.addEventListener('keydown', (e) => {
+			if ((e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === ' ') && !open && atBottom()) {
+				setOpen(true);
+			} else if ((e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Escape') && open) {
+				setOpen(false);
+			}
+		});
+
+		// 内容不足一屏的页面（如主页）无法触发 scroll 事件，加载后即视为已在底部
+		if (atBottom()) scheduleArm();
+	}
+</script>

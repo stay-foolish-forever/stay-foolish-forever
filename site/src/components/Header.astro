@@ -1,0 +1,175 @@
+---
+import { Image } from 'astro:assets';
+import logo from '../assets/logo.png';
+import { SITE_TITLE } from '../consts';
+import HeaderLink from './HeaderLink.astro';
+---
+
+<header>
+	<nav>
+		<a class="site-title" href="/">
+			<Image src={logo} alt="" width={64} height={64} loading="eager" />
+			{SITE_TITLE}
+		</a>
+		<div class="nav-right">
+			<div class="internal-links">
+				<HeaderLink href="/">首页</HeaderLink>
+				<HeaderLink href="/blog">随笔</HeaderLink>
+				<HeaderLink href="/about">关于</HeaderLink>
+			</div>
+			<button id="theme-toggle" type="button" aria-label="切换白天 / 黑夜模式">
+				<svg
+					class="icon-sun"
+					viewBox="0 0 24 24"
+					width="18"
+					height="18"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"
+					><circle cx="12" cy="12" r="5"></circle><line x1="12" y1="1" x2="12" y2="3"
+					></line><line x1="12" y1="21" x2="12" y2="23"></line><line
+						x1="4.22"
+						y1="4.22"
+						x2="5.64"
+						y2="5.64"></line><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line><line
+						x1="1"
+						y1="12"
+						x2="3"
+						y2="12"></line><line x1="21" y1="12" x2="23" y2="12"></line><line
+						x1="4.22"
+						y1="19.78"
+						x2="5.64"
+						y2="18.36"></line><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line></svg
+				>
+				<svg
+					class="icon-moon"
+					viewBox="0 0 24 24"
+					width="18"
+					height="18"
+					fill="none"
+					stroke="currentColor"
+					stroke-width="2"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+					aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path></svg
+				>
+			</button>
+		</div>
+	</nav>
+</header>
+
+<style>
+	header {
+		position: sticky;
+		top: 0;
+		z-index: 10;
+		/* 毛玻璃：完全透明，靠模糊透出下方场景与内容 */
+		background-color: transparent;
+		backdrop-filter: blur(18px) saturate(1.6);
+		-webkit-backdrop-filter: blur(18px) saturate(1.6);
+		border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+	}
+	nav {
+		width: 720px;
+		max-width: calc(100% - 2em);
+		margin: 0 auto;
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		padding: 0.75em 0;
+	}
+	.site-title {
+		display: flex;
+		align-items: center;
+		gap: 0.5em;
+		font-size: 1.05em;
+		font-weight: 700;
+		color: var(--text);
+		text-decoration: none;
+	}
+	.site-title img {
+		width: 30px;
+		height: 30px;
+		border-radius: 50%;
+	}
+	.nav-right {
+		display: flex;
+		align-items: center;
+		gap: 1.2em;
+	}
+	.internal-links {
+		display: flex;
+		gap: 1.1em;
+	}
+	.internal-links a {
+		font-size: 0.95em;
+		color: var(--muted);
+		transition: color 0.2s ease;
+	}
+	.internal-links a:hover {
+		color: var(--accent);
+		text-decoration: none;
+	}
+	.internal-links a.active {
+		color: var(--text);
+	}
+	#theme-toggle {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.35em;
+		border: 1px solid var(--border);
+		border-radius: 8px;
+		background: transparent;
+		color: var(--muted);
+		cursor: pointer;
+		transition:
+			color 0.2s ease,
+			border-color 0.2s ease;
+	}
+	#theme-toggle:hover {
+		color: var(--accent);
+		border-color: var(--accent);
+	}
+</style>
+
+<script>
+	const toggleBtn = document.getElementById('theme-toggle');
+
+	if (toggleBtn) {
+		// aria-label 跟随当前状态（图标本身由全局 CSS 按 data-theme 切换）
+		const syncLabel = () => {
+			const theme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+			toggleBtn.setAttribute(
+				'aria-label',
+				theme === 'dark' ? '当前为黑夜模式，点击切换到白天' : '当前为白天模式，点击切换到黑夜',
+			);
+		};
+		syncLabel();
+		// 自动校准（昼夜边界）或手动切换导致主题变化时同步文案
+		new MutationObserver(syncLabel).observe(document.documentElement, {
+			attributes: true,
+			attributeFilter: ['data-theme'],
+		});
+
+		toggleBtn.addEventListener('click', () => {
+			const current = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+			const next = current === 'dark' ? 'light' : 'dark';
+			document.documentElement.dataset.theme = next;
+			const h = new Date().getHours();
+			const auto = h >= 6 && h < 18 ? 'light' : 'dark';
+			if (next === auto) {
+				// 切回与自动模式一致，视为放弃手动覆盖
+				localStorage.removeItem('theme-override');
+				localStorage.removeItem('theme-override-auto');
+			} else {
+				// 手动覆盖仅保持到下一个昼夜边界（见 BaseHead 的定时校准）
+				localStorage.setItem('theme-override', next);
+				localStorage.setItem('theme-override-auto', auto);
+			}
+		});
+	}
+</script>
